@@ -4,21 +4,21 @@ import string
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
+from flask_cors import CORS
 
-# Loading environment variables from .env file
+# Load .env
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)  # <-- add CORS headers on every response
 
-# Getting the full database connection URI from the environment variables
-db_connection_uri = os.environ.get('DB_CONNECTION_URI')
-
-# Configuring the SQLAlchemy database URI using the Filess.io credentials (MySQL)
-app.config['SQLALCHEMY_DATABASE_URI'] = db_connection_uri
+# Database config
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DB_CONNECTION_URI')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
 db = SQLAlchemy(app)
 
+
+# --- Models --- #
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -36,18 +36,23 @@ class Asset(db.Model):
 class Transaction(db.Model):
     __tablename__ = 'transactions'
     transaction_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.String(10), db.ForeignKey('users.user_id', name='fk_transactions_user_id'), nullable=False)
-    asset_id = db.Column(db.String(10), db.ForeignKey('assets.asset_id', name='fk_transactions_asset_id'), nullable=False)
-    transaction_type = db.Column(db.String(10), nullable=False)  # Expected values: "Buy" or "Sell"
+    user_id = db.Column(db.String(10),
+                        db.ForeignKey('users.user_id',
+                                      name='fk_transactions_user_id'),
+                        nullable=False)
+    asset_id = db.Column(db.String(10),
+                         db.ForeignKey('assets.asset_id',
+                                       name='fk_transactions_asset_id'),
+                         nullable=False)
+    transaction_type = db.Column(db.String(10), nullable=False)  # "Buy" or "Sell"
     quantity = db.Column(db.Numeric(20, 4), nullable=False)
     price = db.Column(db.Numeric(20, 2), nullable=False)
     transaction_date = db.Column(db.DateTime, server_default=db.func.now())
 
 
-# --- Utility Functions --- #
+# --- Utility --- #
 
 def generate_user_id(length=6):
-    """Generate a random user id consisting of lowercase letters and digits."""
     chars = string.ascii_lowercase + string.digits
     return ''.join(random.choices(chars, k=length))
 
@@ -56,10 +61,8 @@ def generate_user_id(length=6):
 
 @app.route('/register', methods=['POST'])
 def register():
-    """Registers a new user with a randomly generated user id."""
     user_id = generate_user_id()
-    # Ensuring uniqueness by checking the database
-    while User.query.filter_by(user_id=user_id).first() is not None:
+    while User.query.filter_by(user_id=user_id).first():
         user_id = generate_user_id()
     new_user = User(user_id=user_id)
     db.session.add(new_user)
@@ -69,47 +72,81 @@ def register():
 
 @app.route('/assets', methods=['GET'])
 def get_assets():
-    """Returns a list of all available assets."""
     assets = Asset.query.all()
-    assets_list = [
-        {
-            'asset_id': asset.asset_id,
-            'asset_name': asset.asset_name,
-            'asset_type': asset.asset_type
-        } for asset in assets
-    ]
-    return jsonify({'assets': assets_list}), 200
+    return jsonify({
+        'assets': [
+            {
+                'asset_id': a.asset_id,
+                'asset_name': a.asset_name,
+                'asset_type': a.asset_type
+            }
+            for a in assets
+        ]
+    }), 200
 
 
 @app.route('/transaction', methods=['POST'])
 def create_transaction():
-    """
-    Records a transaction for a given user.
-    Expects JSON with keys: 'user_id', 'asset_id', 'transaction_type', 'quantity', and 'price'
-    """
-    data = request.json
-    required_fields = ['user_id', 'asset_id', 'transaction_type', 'quantity', 'price']
-    missing_fields = [field for field in required_fields if field not in data]
-    if missing_fields:
-        return jsonify({"error": f"Missing fields: {', '.join(missing_fields)}"}), 400
+    data = request.get_json() or {}
+    required = ['user_id', 'asset_id', 'transaction_type', 'quantity', 'price']
+    missing = [f for f in required if f not in data]
+    if missing:
+        return jsonify({'error': f"Missing fields: {', '.join(missing)}"}), 400
 
-    new_transaction = Transaction(
+    tx = Transaction(
         user_id=data['user_id'],
         asset_id=data['asset_id'],
         transaction_type=data['transaction_type'],
         quantity=data['quantity'],
         price=data['price']
     )
-    db.session.add(new_transaction)
+    db.session.add(tx)
     db.session.commit()
-    return jsonify({'transaction_id': new_transaction.transaction_id}), 201
+    return jsonify({'transaction_id': tx.transaction_id}), 201
+
+@app.route('/transactions', methods=['GET'])
+def list_transactions():
+    """
+    Querystring params:
+      - user_id: required
+    Returns all transactions for that user.
+    """
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Missing required query param: user_id"}), 400
+
+    # ensure user exists?
+    if User.query.get(user_id) is None:
+        return jsonify({"error": f"No such user: {user_id}"}), 404
+
+    txs = Transaction.query.filter_by(user_id=user_id) \
+                           .order_by(Transaction.transaction_date.desc()) \
+                           .all()
+
+    result = []
+    for t in txs:
+        result.append({
+            "transaction_id":   t.transaction_id,
+            "asset_id":         t.asset_id,
+            "transaction_type": t.transaction_type,
+            "quantity":         float(t.quantity),
+            "price":            float(t.price),
+            "date":             t.transaction_date.isoformat()
+        })
+
+    return jsonify({ "transactions": result }), 200
 
 
-# --- Seeding the Assets Table --- #
-with app.app_context():
-    db.create_all()  # Create tables if they don't exist
+
+
+# --- Flask CLI command to init & seed the DB --- #
+
+@app.cli.command('init-db')
+def init_db():
+    """Create tables and seed the assets table."""
+    db.create_all()
     if Asset.query.count() == 0:
-        assets_to_add = [
+        seed = [
             Asset(asset_id='TSLA', asset_name='Tesla Inc.', asset_type='Stock'),
             Asset(asset_id='AAPL', asset_name='Apple Inc.', asset_type='Stock'),
             Asset(asset_id='GOOGL', asset_name='Alphabet Inc.', asset_type='Stock'),
@@ -122,9 +159,10 @@ with app.app_context():
             Asset(asset_id='GBP', asset_name='British Pound', asset_type='Currency'),
             Asset(asset_id='JPY', asset_name='Japanese Yen', asset_type='Currency'),
         ]
-        db.session.bulk_save_objects(assets_to_add)
+        db.session.bulk_save_objects(seed)
         db.session.commit()
+    print("✅ Database initialized and assets seeded.")
+
 
 if __name__ == '__main__':
-    print("Starting Flask server...")
     app.run(debug=True)
