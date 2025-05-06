@@ -1,6 +1,7 @@
 import os
 import random
 import string
+import requests
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
@@ -9,6 +10,10 @@ from flask_cors import CORS
 # Load .env
 load_dotenv()
 
+# Alpha Vantage API key (ensure this is set in your .env file)
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+API_BASE_URL = 'https://www.alphavantage.co/query'
+
 app = Flask(__name__)
 CORS(app)  # <-- add CORS headers on every response
 
@@ -16,7 +21,6 @@ CORS(app)  # <-- add CORS headers on every response
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DB_CONNECTION_URI')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
-
 
 # --- Models --- #
 
@@ -137,6 +141,42 @@ def list_transactions():
     return jsonify({ "transactions": result }), 200
 
 
+@app.route('/stock/<symbol>', methods=['GET'])
+def get_stock_data(symbol):
+    """
+    Fetches real-time stock data from Alpha Vantage for the given symbol.
+    Example: /stock/TSLA will return the stock data for Tesla.
+    """
+    # Define the API parameters for real-time stock data
+    params = {
+        'function': 'TIME_SERIES_INTRADAY',  # Intraday stock data
+        'symbol': symbol,  # Stock symbol (e.g., TSLA, AAPL)
+        'interval': '5min',  # Data interval (e.g., 5 minutes, 1 minute, etc.)
+        'apikey': ALPHA_VANTAGE_API_KEY
+    }
+
+    # Make the request to Alpha Vantage API
+    response = requests.get(API_BASE_URL, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+
+        # Check if stock data is available
+        if 'Time Series (5min)' in data:
+            stock_data = data['Time Series (5min)']
+            latest_time = list(stock_data.keys())[0]  # Get the most recent time entry
+            latest_data = stock_data[latest_time]
+
+            # Return the relevant stock data
+            return jsonify({
+                'symbol': symbol,
+                'price': latest_data['4. close'],  # Close price at that time
+                'time': latest_time
+            })
+        else:
+            return jsonify({'error': 'No data found for the given symbol.'}), 404
+    else:
+        return jsonify({'error': 'Failed to fetch stock data.'}), 500
 
 
 # --- Flask CLI command to init & seed the DB --- #
