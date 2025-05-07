@@ -4,23 +4,25 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Register - Asset Manager</title>
-  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
-  <header>
-    <h1>Asset Manager - Register</h1>
-  </header>
-
-  <main>
-    <div id="content">
-      <h2>Create an Account</h2>
-      <p>Click the button below to generate a unique user ID.</p>
-      <button id="register-btn">Register</button>
-      <div id="register-result"></div>
-      <p>Already have an account? <a href="index.html">Login</a></p>
+  <div class="container">
+    <div class="login-card">
+      <div class="logo">
+        <i class="fas fa-wallet"></i>
+      </div>
+      <h1>Asset Manager</h1>
+      <div class="login-form">
+        <h2>Create an Account</h2>
+        <p style="text-align: center; margin-bottom: 2rem; color: #bbb;">Click the button below to generate a unique user ID.</p>
+        <button id="register-btn" class="btn-login">Register</button>
+        <div id="register-result"></div>
+        <p class="register-link">Already have an account? <a href="index.html">Login</a></p>
+      </div>
     </div>
-  </main>
-
+  </div>
   <script src="js/register.js"></script>
 </body>
 </html>

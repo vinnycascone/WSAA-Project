@@ -3,25 +3,83 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard - Asset Manager</title>
-  <link rel="stylesheet" href="css/styles.css">
+  <title>Asset Manager - Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Asset Manager Dashboard</h1>
-    <nav>
-      <button id="btn-load-assets">Load Assets</button>
-      <button id="btn-new-transaction">New Transaction</button>
-      <button id="btn-view-transactions">View Transactions</button>
-      <button id="btn-view-gains">View Gains</button>
-      <button id="btn-logout">Logout</button>
-    </nav>
-  </header>
-
-  <main>
-    <div id="content"></div>
-  </main>
-
+  <div class="dashboard-container">
+    <!-- Sidebar -->
+    <div class="sidebar">
+      <div class="logo">
+        <i class="fas fa-wallet"></i>
+        <h1>Asset Manager</h1>
+      </div>
+      <div class="user-info">
+        <i class="fas fa-user-circle"></i>
+        <span id="user-id-display">User ID: Loading...</span>
+      </div>
+      <div class="nav-menu">
+        <button id="btn-dashboard" class="nav-item active">
+          <i class="fas fa-tachometer-alt"></i>
+          <span>Dashboard</span>
+        </button>
+        <button id="btn-load-assets" class="nav-item">
+          <i class="fas fa-coins"></i>
+          <span>Available Assets</span>
+        </button>
+        <button id="btn-new-transaction" class="nav-item">
+          <i class="fas fa-exchange-alt"></i>
+          <span>New Transaction</span>
+        </button>
+        <button id="btn-view-transactions" class="nav-item">
+          <i class="fas fa-history"></i>
+          <span>Transactions</span>
+        </button>
+        <button id="btn-view-gains" class="nav-item">
+          <i class="fas fa-chart-line"></i>
+          <span>Analytics</span>
+        </button>
+      </div>
+      <button id="btn-logout" class="logout-btn">
+        <i class="fas fa-sign-out-alt"></i>
+        <span>Logout</span>
+      </button>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="main-content">
+      <div class="top-bar">
+        <div class="page-info">
+          <h2 id="page-title">Dashboard</h2>
+          <p id="page-description">Welcome to your portfolio overview</p>
+        </div>
+        <div class="top-actions">
+          <button id="btn-refresh" class="action-button" title="Refresh Data">
+            <i class="fas fa-sync-alt"></i>
+          </button>
+          <div class="date-display" id="current-date">Loading...</div>
+          <button id="toggle-theme" class="theme-toggle">
+            <i class="fas fa-moon"></i>
+          </button>
+        </div>
+      </div>
+      
+      <!-- Cache Status Indicator (Optional) -->
+      <div id="cache-status" class="cache-status"></div>
+      
+      <!-- Dashboard Content Area -->
+      <div id="content" class="dashboard-content">
+        <div class="loading-spinner">
+          <i class="fas fa-spinner fa-spin"></i>
+          <span>Loading your portfolio...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  
   <script src="js/dashboard.js"></script>
 </body>
 </html>

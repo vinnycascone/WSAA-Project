@@ -7,20 +7,29 @@ from flask_sqlalchemy import SQLAlchemy
 from dotenv import load_dotenv
 from flask_cors import CORS
 
-# Load .env
+# Load environment variables from .env file
 load_dotenv()
 
-# Alpha Vantage API key (ensure this is set in your .env file)
+# Constants
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 API_BASE_URL = 'https://www.alphavantage.co/query'
 
+# Flask setup
 app = Flask(__name__)
-CORS(app)  # <-- add CORS headers on every response
+CORS(app)
 
-# Database config
+# Database configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DB_CONNECTION_URI')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping':    True,   # always test/check if the connection is alive
+    'pool_recycle':     50,     # recycle well before MySQL’s wait_timeout (≈60s)
+    'pool_timeout':     20,     # how long to wait for a free slot before raising
+    'pool_size':        5,      # keep 5 ready‐to‐use connections
+    'max_overflow':     0,      # never open more than those 5
+}
 db = SQLAlchemy(app)
+
 
 # --- Models --- #
 
@@ -41,12 +50,10 @@ class Transaction(db.Model):
     __tablename__ = 'transactions'
     transaction_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     user_id = db.Column(db.String(10),
-                        db.ForeignKey('users.user_id',
-                                      name='fk_transactions_user_id'),
+                        db.ForeignKey('users.user_id', name='fk_transactions_user_id'),
                         nullable=False)
     asset_id = db.Column(db.String(10),
-                         db.ForeignKey('assets.asset_id',
-                                       name='fk_transactions_asset_id'),
+                         db.ForeignKey('assets.asset_id', name='fk_transactions_asset_id'),
                          nullable=False)
     transaction_type = db.Column(db.String(10), nullable=False)  # "Buy" or "Sell"
     quantity = db.Column(db.Numeric(20, 4), nullable=False)
@@ -65,6 +72,7 @@ def generate_user_id(length=6):
 
 @app.route('/register', methods=['POST'])
 def register():
+    """Register a new user and return the generated user_id."""
     user_id = generate_user_id()
     while User.query.filter_by(user_id=user_id).first():
         user_id = generate_user_id()
@@ -76,6 +84,7 @@ def register():
 
 @app.route('/assets', methods=['GET'])
 def get_assets():
+    """Retrieve the list of available assets."""
     assets = Asset.query.all()
     return jsonify({
         'assets': [
@@ -91,11 +100,20 @@ def get_assets():
 
 @app.route('/transaction', methods=['POST'])
 def create_transaction():
+    """Create a new transaction (buy/sell) for a user."""
     data = request.get_json() or {}
     required = ['user_id', 'asset_id', 'transaction_type', 'quantity', 'price']
     missing = [f for f in required if f not in data]
     if missing:
         return jsonify({'error': f"Missing fields: {', '.join(missing)}"}), 400
+
+    # Validate user
+    if not User.query.get(data['user_id']):
+        return jsonify({'error': f"No such user: {data['user_id']}"}), 404
+
+    # Validate asset
+    if not Asset.query.get(data['asset_id']):
+        return jsonify({'error': f"No such asset: {data['asset_id']}"}), 404
 
     tx = Transaction(
         user_id=data['user_id'],
@@ -108,82 +126,70 @@ def create_transaction():
     db.session.commit()
     return jsonify({'transaction_id': tx.transaction_id}), 201
 
+
 @app.route('/transactions', methods=['GET'])
 def list_transactions():
-    """
-    Querystring params:
-      - user_id: required
-    Returns all transactions for that user.
-    """
+    """Return all transactions for a specific user."""
     user_id = request.args.get('user_id')
     if not user_id:
         return jsonify({"error": "Missing required query param: user_id"}), 400
 
-    # ensure user exists?
-    if User.query.get(user_id) is None:
+    if not User.query.get(user_id):
         return jsonify({"error": f"No such user: {user_id}"}), 404
 
-    txs = Transaction.query.filter_by(user_id=user_id) \
-                           .order_by(Transaction.transaction_date.desc()) \
+    txs = Transaction.query.filter_by(user_id=user_id)\
+                           .order_by(Transaction.transaction_date.desc())\
                            .all()
 
-    result = []
-    for t in txs:
-        result.append({
-            "transaction_id":   t.transaction_id,
-            "asset_id":         t.asset_id,
-            "transaction_type": t.transaction_type,
-            "quantity":         float(t.quantity),
-            "price":            float(t.price),
-            "date":             t.transaction_date.isoformat()
-        })
+    result = [{
+        "transaction_id": t.transaction_id,
+        "asset_id": t.asset_id,
+        "transaction_type": t.transaction_type,
+        "quantity": float(t.quantity),
+        "price": float(t.price),
+        "date": t.transaction_date.isoformat()
+    } for t in txs]
 
-    return jsonify({ "transactions": result }), 200
+    return jsonify({"transactions": result}), 200
 
 
 @app.route('/stock/<symbol>', methods=['GET'])
 def get_stock_data(symbol):
-    """
-    Fetches real-time stock data from Alpha Vantage for the given symbol.
-    Example: /stock/TSLA will return the stock data for Tesla.
-    """
-    # Define the API parameters for real-time stock data
+    """Fetch latest stock data from Alpha Vantage for a given symbol."""
     params = {
-        'function': 'TIME_SERIES_INTRADAY',  # Intraday stock data
-        'symbol': symbol,  # Stock symbol (e.g., TSLA, AAPL)
-        'interval': '5min',  # Data interval (e.g., 5 minutes, 1 minute, etc.)
+        'function': 'TIME_SERIES_INTRADAY',
+        'symbol': symbol,
+        'interval': '5min',
         'apikey': ALPHA_VANTAGE_API_KEY
     }
 
-    # Make the request to Alpha Vantage API
-    response = requests.get(API_BASE_URL, params=params)
+    try:
+        response = requests.get(API_BASE_URL, params=params)
+        response.raise_for_status()
+    except requests.RequestException:
+        return jsonify({'error': 'Failed to connect to stock data provider.'}), 503
 
-    if response.status_code == 200:
-        data = response.json()
+    data = response.json()
 
-        # Check if stock data is available
-        if 'Time Series (5min)' in data:
-            stock_data = data['Time Series (5min)']
-            latest_time = list(stock_data.keys())[0]  # Get the most recent time entry
-            latest_data = stock_data[latest_time]
+    if 'Time Series (5min)' not in data:
+        return jsonify({'error': 'No data found for the given symbol.'}), 404
 
-            # Return the relevant stock data
-            return jsonify({
-                'symbol': symbol,
-                'price': latest_data['4. close'],  # Close price at that time
-                'time': latest_time
-            })
-        else:
-            return jsonify({'error': 'No data found for the given symbol.'}), 404
-    else:
-        return jsonify({'error': 'Failed to fetch stock data.'}), 500
+    stock_data = data['Time Series (5min)']
+    latest_time = sorted(stock_data.keys())[-1]
+    latest_data = stock_data[latest_time]
+
+    return jsonify({
+        'symbol': symbol,
+        'price': latest_data['4. close'],
+        'time': latest_time
+    }), 200
 
 
-# --- Flask CLI command to init & seed the DB --- #
+# --- Command line command to initialize and seed DB --- #
 
 @app.cli.command('init-db')
 def init_db():
-    """Create tables and seed the assets table."""
+    """Create all tables and seed initial asset data."""
     db.create_all()
     if Asset.query.count() == 0:
         seed = [
@@ -203,6 +209,8 @@ def init_db():
         db.session.commit()
     print("✅ Database initialized and assets seeded.")
 
+
+# --- Run App --- #
 
 if __name__ == '__main__':
     app.run(debug=True)
