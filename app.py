@@ -18,6 +18,15 @@ API_BASE_URL = 'https://www.alphavantage.co/query'
 app = Flask(__name__)
 CORS(app)
 
+from flask_caching import Cache # type: ignore
+
+# configure a simple in-memory cache with 60 s TTL
+cache = Cache(app, config={
+    "CACHE_TYPE": "SimpleCache",
+    "CACHE_DEFAULT_TIMEOUT": 60
+})
+
+
 # Database configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DB_CONNECTION_URI')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -184,6 +193,9 @@ def get_stock_data(symbol):
         'time': latest_time
     }), 200
 
+from flask import request
+
+
 
 # --- Command line command to initialize and seed DB --- #
 
@@ -210,7 +222,70 @@ def init_db():
     print("✅ Database initialized and assets seeded.")
 
 
+def fetch_price_for(asset_id):
+    """Return (price, time) or raise ValueError."""
+    asset = Asset.query.get(asset_id)
+    if not asset:
+        raise ValueError(f"Unknown asset: {asset_id}")
+
+    if asset.asset_type == 'Stock':
+        function, json_key = 'TIME_SERIES_INTRADAY', 'Time Series (5min)'
+        params = {'symbol': asset_id, 'interval': '5min'}
+    else:
+        # use exchange-rate for both Crypto & Currency
+        function, json_key = 'CURRENCY_EXCHANGE_RATE', 'Realtime Currency Exchange Rate'
+        params = {'from_currency': asset_id, 'to_currency': 'USD'}
+
+    params.update({'function': function, 'apikey': ALPHA_VANTAGE_API_KEY})
+
+    resp = requests.get(API_BASE_URL, params=params)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if json_key not in data:
+        raise ValueError(f"No data for {asset_id}: {data.get('Note') or data}")
+
+    if function == 'TIME_SERIES_INTRADAY':
+        block = data[json_key]
+        latest = sorted(block.keys())[-1]
+        price = block[latest]['4. close']
+        ts    = latest
+    else:
+        block = data[json_key]
+        price = block['5. Exchange Rate']
+        ts    = block['6. Last Refreshed']
+
+    return price, ts
+
+
+@app.route('/prices', methods=['GET'])
+@cache.cached(key_prefix=lambda: request.full_path)
+def get_batch_prices():
+    """
+    GET /prices?assets=TSLA,AAPL,BTC,...
+    Returns one JSON array of all prices, cached for 60s.
+    """
+    raw = request.args.get('assets', '')
+    asset_ids = [a.strip().upper() for a in raw.split(',') if a.strip()]
+    if not asset_ids:
+        return jsonify({"error": "Provide ?assets=SYM1,SYM2,…"}), 400
+
+    out = []
+    for aid in asset_ids:
+        try:
+            price, ts = fetch_price_for(aid)
+            out.append({'symbol': aid, 'price': price, 'time': ts})
+        except Exception as e:
+            out.append({'symbol': aid, 'error': str(e)})
+
+    return jsonify({'prices': out}), 200
+
 # --- Run App --- #
+
+
+
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)

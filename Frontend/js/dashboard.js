@@ -7,32 +7,32 @@ const userIdDisplayEl = document.getElementById('user-id-display');
 
 // Data cache to avoid multiple API calls
 const DataCache = {
+  // cached data
   assets: null,
   transactions: null,
+  prices: null,        // for batch price responses
+
+  // timestamps of last fetch
   lastFetchTime: {
-    assets: null, 
-    transactions: null
+    assets: null,
+    transactions: null,
+    prices: null
   },
-  cacheExpiry: 60000, // Cache expiry time (1 minute)
-  
+
+  // Cache expiry time (1 minute)
+  cacheExpiry: 60_000,
+
   // Fetch and cache assets
   async getAssets() {
     const now = Date.now();
-    // Check if cache is valid
-    if (this.assets && this.lastFetchTime.assets && 
+    if (this.assets && this.lastFetchTime.assets &&
         (now - this.lastFetchTime.assets < this.cacheExpiry)) {
       return this.assets;
     }
-    
-    // Fetch new data
     try {
       const res = await fetch(`${API_BASE}/assets`);
       const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error('Failed to fetch assets');
-      }
-      
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch assets');
       this.assets = data.assets || [];
       this.lastFetchTime.assets = now;
       return this.assets;
@@ -41,25 +41,18 @@ const DataCache = {
       throw err;
     }
   },
-  
+
   // Fetch and cache transactions
   async getTransactions(userId) {
     const now = Date.now();
-    // Check if cache is valid
-    if (this.transactions && this.lastFetchTime.transactions && 
+    if (this.transactions && this.lastFetchTime.transactions &&
         (now - this.lastFetchTime.transactions < this.cacheExpiry)) {
       return this.transactions;
     }
-    
-    // Fetch new data
     try {
       const res = await fetch(`${API_BASE}/transactions?user_id=${encodeURIComponent(userId)}`);
       const data = await res.json();
-      
-      if (!res.ok) {
-        throw new Error('Failed to fetch transactions');
-      }
-      
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch transactions');
       this.transactions = data.transactions || [];
       this.lastFetchTime.transactions = now;
       return this.transactions;
@@ -68,13 +61,56 @@ const DataCache = {
       throw err;
     }
   },
-  
-  // Clear cache (use after new transactions)
+
+  // Fetch and cache a single asset price (fallback use)
+  async getPrice(assetId) {
+    try {
+      const res = await fetch(`${API_BASE}/price/${encodeURIComponent(assetId)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch price');
+      return data;  // { symbol, price, time }
+    } catch (err) {
+      console.error('Error fetching price for', assetId, err);
+      throw err;
+    }
+  },
+
+  // Batch-fetch and cache prices for multiple assets in one call
+  async getPrices(symbols) {
+    const now = Date.now();
+    const key = symbols.join(',');
+
+    // Reuse cached batch if still valid
+    if (this.prices?.key === key &&
+        this.lastFetchTime.prices &&
+        (now - this.lastFetchTime.prices < this.cacheExpiry)) {
+      return this.prices.data;
+    }
+
+    // Otherwise fetch fresh
+    try {
+      const res = await fetch(`${API_BASE}/prices?assets=${encodeURIComponent(key)}`);
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || 'Failed to fetch batch prices');
+
+      // Cache the result
+      this.prices = { key, data: payload.prices };
+      this.lastFetchTime.prices = now;
+      return payload.prices;
+    } catch (err) {
+      console.error('Error fetching batch prices:', err);
+      throw err;
+    }
+  },
+
+  // Clear all caches (e.g. after a new transaction)
   clearCache() {
     this.assets = null;
     this.transactions = null;
+    this.prices = null;
     this.lastFetchTime.assets = null;
     this.lastFetchTime.transactions = null;
+    this.lastFetchTime.prices = null;
     console.log('Cache cleared');
   }
 };
@@ -90,11 +126,11 @@ userIdDisplayEl.textContent = `User ID: ${userId}`;
 
 // Display current date
 const now = new Date();
-currentDateEl.textContent = now.toLocaleDateString('en-US', { 
-  weekday: 'long', 
-  year: 'numeric', 
-  month: 'long', 
-  day: 'numeric' 
+currentDateEl.textContent = now.toLocaleDateString('en-US', {
+  weekday: 'long',
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric'
 });
 
 // Event Listeners for buttons
@@ -114,7 +150,7 @@ if (refreshBtn) {
 // Refresh data (clear cache and reload current view)
 function refreshData() {
   DataCache.clearCache();
-  
+
   // Get the active page and reload it
   const activeNav = document.querySelector('.nav-item.active');
   if (activeNav) {
@@ -130,7 +166,7 @@ function setActiveNavItem(id) {
   document.querySelectorAll('.nav-item').forEach(item => {
     item.classList.remove('active');
   });
-  
+
   // Add active class to clicked nav item
   document.getElementById(id).classList.add('active');
 }
@@ -141,84 +177,100 @@ function logout() {
   window.location.href = 'index.html'; // Redirect to login page
 }
 
-// Load dashboard (default view)
 async function loadDashboard() {
   setActiveNavItem('btn-dashboard');
   pageTitleEl.textContent = 'Dashboard';
-  
+
+  // show spinner while we fetch data & prices
   contentEl.innerHTML = `
     <div class="loading-spinner">
       <i class="fas fa-spinner fa-spin"></i>
       <span>Loading your portfolio...</span>
     </div>
   `;
-  
+
   try {
-    // Get data from cache
+    // 1) fetch cached transactions & assets
     const [transactions, assets] = await Promise.all([
       DataCache.getTransactions(userId),
       DataCache.getAssets()
     ]);
-    
-    // Calculate portfolio stats
+
+    // 2) build holdings & totalInvested
     let totalInvested = 0;
-    let totalValue = 0;
-    let totalGains = 0;
-    let recentTransactions = [];
-    
-    // Track holdings per asset
     const holdings = {};
-    
+    const recentTransactions = [];
+
     transactions.forEach(tx => {
-      const transactionValue = tx.quantity * tx.price;
-      
-      // Add to recent transactions (limit to 5)
+      const value = tx.quantity * tx.price;
+
+      // capture up to 5 recent
       if (recentTransactions.length < 5) {
         recentTransactions.push(tx);
       }
-      
-      // Track holdings
+
       if (!holdings[tx.asset_id]) {
         holdings[tx.asset_id] = {
           asset_id: tx.asset_id,
-          quantity: 0,
-          invested: 0,
           asset_name: assets.find(a => a.asset_id === tx.asset_id)?.asset_name || tx.asset_id,
-          asset_type: assets.find(a => a.asset_id === tx.asset_id)?.asset_type || 'Unknown'
+          asset_type: assets.find(a => a.asset_id === tx.asset_id)?.asset_type || 'Unknown',
+          quantity: 0,
+          invested: 0
         };
       }
-      
-      // Update holdings based on transaction type
+
       if (tx.transaction_type === 'Buy') {
         holdings[tx.asset_id].quantity += tx.quantity;
-        holdings[tx.asset_id].invested += transactionValue;
-        totalInvested += transactionValue;
+        holdings[tx.asset_id].invested += value;
+        totalInvested += value;
       } else {
         holdings[tx.asset_id].quantity -= tx.quantity;
-        totalValue += transactionValue; // Assuming sell price is current value
       }
     });
-    
-    // Calculate total current value (for this demo we'll use the last transaction price for each asset)
-    // In a real app, you'd get current market prices
-    Object.values(holdings).forEach(holding => {
-      const latestPrice = transactions
-        .filter(tx => tx.asset_id === holding.asset_id)
-        .sort((a, b) => new Date(b.date) - new Date(a.date))[0]?.price || 0;
-      
-      holding.current_price = latestPrice;
-      holding.current_value = holding.quantity * latestPrice;
-      totalValue += holding.current_value;
-    });
-    
-    // Calculate gains
-    totalGains = totalValue - totalInvested;
-    const gainPercentage = totalInvested > 0 ? (totalGains / totalInvested) * 100 : 0;
-    
-    // Only keep holdings with positive quantities
+
+    // only keep assets with >0 quantity
     const activeHoldings = Object.values(holdings).filter(h => h.quantity > 0);
-    
-    // Render dashboard
+
+    // --- inside loadDashboard, after you build `activeHoldings` ---
+    // 3) fetch all live prices in one batch call
+    let batch;
+    try {
+      const symbols = activeHoldings.map(h => h.asset_id);
+      batch = await DataCache.getPrices(symbols);
+    } catch (err) {
+      console.warn('Batch fetch failed — falling back to individual calls', err);
+      // fallback to previous parallel approach
+      batch = await Promise.all(activeHoldings.map(h =>
+        DataCache.getPrice(h.asset_id)
+          .then(({ price }) => ({ symbol: h.asset_id, price }))
+          .catch(() => ({ symbol: h.asset_id, price: (h.invested / h.quantity).toString() }))
+      ));
+    }
+
+    // turn batch into livePrices with numeric fallback
+    const livePrices = batch.map(p => {
+      const asset_id = p.symbol;
+      const priceNum = p.price != null ? parseFloat(p.price)
+        : activeHoldings.find(h => h.asset_id === asset_id).invested
+        / activeHoldings.find(h => h.asset_id === asset_id).quantity;
+      return { asset_id, price: priceNum };
+    });
+
+
+    // 4) merge livePrices back in…
+    let totalValue = 0;
+    livePrices.forEach(({ asset_id, price }) => {
+      const h = activeHoldings.find(x => x.asset_id === asset_id);
+      h.live_price = price;
+      h.current_value = h.quantity * price;
+      totalValue += h.current_value;
+    });
+
+    // 5) compute totalGains & percentage
+    const totalGains = totalValue - totalInvested;
+    const gainPct = totalInvested > 0 ? (totalGains / totalInvested) * 100 : 0;
+
+    // 6) render summary cards + portfolio table + recent tx
     contentEl.innerHTML = `
       <div class="summary-cards">
         <div class="summary-card">
@@ -226,30 +278,27 @@ async function loadDashboard() {
           <div class="card-title">Total Portfolio Value</div>
           <div class="card-value">$${totalValue.toFixed(2)}</div>
         </div>
-        
         <div class="summary-card">
           <div class="card-icon"><i class="fas fa-money-bill"></i></div>
           <div class="card-title">Total Invested</div>
           <div class="card-value">$${totalInvested.toFixed(2)}</div>
         </div>
-        
         <div class="summary-card">
           <div class="card-icon"><i class="fas fa-chart-line"></i></div>
           <div class="card-title">Total Gain/Loss</div>
           <div class="card-value">$${totalGains.toFixed(2)}</div>
           <div class="card-change ${totalGains >= 0 ? 'positive' : 'negative'}">
             <i class="fas fa-${totalGains >= 0 ? 'arrow-up' : 'arrow-down'}"></i>
-            ${Math.abs(gainPercentage).toFixed(2)}%
+            ${Math.abs(gainPct).toFixed(2)}%
           </div>
         </div>
-        
         <div class="summary-card">
           <div class="card-icon"><i class="fas fa-coins"></i></div>
           <div class="card-title">Active Assets</div>
           <div class="card-value">${activeHoldings.length}</div>
         </div>
       </div>
-      
+
       <h3 class="section-title"><i class="fas fa-briefcase"></i> Your Portfolio</h3>
       ${activeHoldings.length > 0 ? `
         <div class="portfolio-assets">
@@ -258,92 +307,91 @@ async function loadDashboard() {
               <tr>
                 <th>Asset</th>
                 <th>Type</th>
-                <th>Quantity</th>
-                <th>Current Price</th>
+                <th>Qty</th>
+                <th>Live Price</th>
                 <th>Current Value</th>
                 <th>Invested</th>
                 <th>Gain/Loss</th>
               </tr>
             </thead>
             <tbody>
-              ${activeHoldings.map(holding => {
-                const holdingGain = holding.current_value - holding.invested;
-                const holdingGainPct = holding.invested > 0 ? (holdingGain / holding.invested) * 100 : 0;
-                
-                return `
+              ${activeHoldings.map(h => {
+      const gain = h.current_value - h.invested;
+      const pct = h.invested > 0 ? (gain / h.invested) * 100 : 0;
+      return `
                   <tr>
-                    <td>${holding.asset_name}</td>
-                    <td>${holding.asset_type}</td>
-                    <td>${holding.quantity}</td>
-                    <td>$${holding.current_price.toFixed(2)}</td>
-                    <td>$${holding.current_value.toFixed(2)}</td>
-                    <td>$${holding.invested.toFixed(2)}</td>
-                    <td class="${holdingGain >= 0 ? 'positive' : 'negative'}">
-                      $${holdingGain.toFixed(2)} (${Math.abs(holdingGainPct).toFixed(2)}%)
+                    <td>${h.asset_name}</td>
+                    <td>${h.asset_type}</td>
+                    <td>${h.quantity}</td>
+                    <td>$${h.live_price.toFixed(2)}</td>
+                    <td>$${h.current_value.toFixed(2)}</td>
+                    <td>$${h.invested.toFixed(2)}</td>
+                    <td class="${gain >= 0 ? 'positive' : 'negative'}">
+                      $${gain.toFixed(2)} (${Math.abs(pct).toFixed(2)}%)
                     </td>
                   </tr>
                 `;
-              }).join('')}
+    }).join('')}
             </tbody>
           </table>
         </div>
-      ` : '<p>No active assets in your portfolio. Use the "New Transaction" option to add assets.</p>'}
-      
+      ` : '<p>No active assets. Use "New Transaction" to get started.</p>'}
+
       <h3 class="section-title"><i class="fas fa-history"></i> Recent Transactions</h3>
       ${recentTransactions.length > 0 ? `
         <div class="portfolio-assets">
           <table>
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Asset</th>
-                <th>Type</th>
-                <th>Quantity</th>
-                <th>Price</th>
-                <th>Total</th>
+                <th>Date</th><th>Asset</th><th>Type</th><th>Qty</th><th>Price</th><th>Total</th>
               </tr>
             </thead>
             <tbody>
               ${recentTransactions.map(tx => {
-                const asset = assets.find(a => a.asset_id === tx.asset_id);
-                return `
+      const asset = assets.find(a => a.asset_id === tx.asset_id);
+      return `
                   <tr>
                     <td>${new Date(tx.date).toLocaleDateString()}</td>
-                    <td>${asset ? asset.asset_name : tx.asset_id}</td>
+                    <td>${asset?.asset_name || tx.asset_id}</td>
                     <td>${tx.transaction_type}</td>
                     <td>${tx.quantity}</td>
                     <td>$${tx.price.toFixed(2)}</td>
                     <td>$${(tx.quantity * tx.price).toFixed(2)}</td>
                   </tr>
                 `;
-              }).join('')}
+    }).join('')}
             </tbody>
           </table>
         </div>
-      ` : '<p>No recent transactions found.</p>'}
+      ` : '<p>No recent transactions.</p>'}
     `;
-    
   } catch (err) {
-    contentEl.innerHTML = `<p class="result-error">Error loading dashboard: ${err.message}</p>`;
+    contentEl.innerHTML = `
+      <p class="result-error">
+        <i class="fas fa-exclamation-circle"></i>
+        Error loading dashboard: ${err.message}
+      </p>
+    `;
   }
 }
+
 
 // Load assets function
 async function loadAssets() {
   setActiveNavItem('btn-load-assets');
   pageTitleEl.textContent = 'Available Assets';
-  
+
   contentEl.innerHTML = `
     <div class="loading-spinner">
       <i class="fas fa-spinner fa-spin"></i>
       <span>Loading assets...</span>
     </div>
   `;
-  
+
   try {
     // Get assets from cache
     const assets = await DataCache.getAssets();
-    
+
     if (assets && assets.length > 0) {
       contentEl.innerHTML = `
         <div class="portfolio-assets">
@@ -390,7 +438,7 @@ function showTransactionFormForAsset(assetId) {
 function showTransactionForm(preselectedAssetId = '') {
   setActiveNavItem('btn-new-transaction');
   pageTitleEl.textContent = 'New Transaction';
-  
+
   // Show loading spinner
   contentEl.innerHTML = `
     <div class="loading-spinner">
@@ -398,7 +446,7 @@ function showTransactionForm(preselectedAssetId = '') {
       <span>Loading transaction form...</span>
     </div>
   `;
-  
+
   // Use cache for assets
   DataCache.getAssets()
     .then(assets => {
@@ -444,31 +492,31 @@ function showTransactionForm(preselectedAssetId = '') {
           <div id="tx-result"></div>
         </div>
       `;
-      
+
       // Add validation for sell transactions
       const txTypeSelect = document.getElementById('transaction_type');
       const assetSelect = document.getElementById('asset_id');
       const quantityInput = document.getElementById('quantity');
-      
+
       // Check available quantity when selecting "Sell"
       txTypeSelect.addEventListener('change', async () => {
         if (txTypeSelect.value === 'Sell' && assetSelect.value) {
           await validateSellQuantity(assetSelect.value);
         }
       });
-      
+
       // Check available quantity when selecting an asset with "Sell" already selected
       assetSelect.addEventListener('change', async () => {
         if (txTypeSelect.value === 'Sell' && assetSelect.value) {
           await validateSellQuantity(assetSelect.value);
         }
       });
-      
+
       async function validateSellQuantity(assetId) {
         try {
           // Get transactions from cache
           const transactions = await DataCache.getTransactions(userId);
-          
+
           // Calculate available quantity
           let availableQty = 0;
           transactions.forEach(tx => {
@@ -480,10 +528,10 @@ function showTransactionForm(preselectedAssetId = '') {
               }
             }
           });
-          
+
           // Update max value
           quantityInput.max = availableQty;
-          
+
           // Add hint about maximum available
           const qtyLabel = document.querySelector('label[for="quantity"]');
           qtyLabel.textContent = `Quantity: (Max ${availableQty.toFixed(2)} available)`;
@@ -491,9 +539,9 @@ function showTransactionForm(preselectedAssetId = '') {
           console.error('Error validating sell quantity:', err);
         }
       }
-      
+
       // Handle form submission
-      document.getElementById('tx-form').addEventListener('submit', async function(ev) {
+      document.getElementById('tx-form').addEventListener('submit', async function (ev) {
         ev.preventDefault();
         const form = ev.target;
         const body = {
@@ -509,7 +557,7 @@ function showTransactionForm(preselectedAssetId = '') {
           try {
             const transactions = await DataCache.getTransactions(userId);
             let availableQty = 0;
-            
+
             transactions.forEach(tx => {
               if (tx.asset_id === body.asset_id) {
                 if (tx.transaction_type === 'Buy') {
@@ -519,7 +567,7 @@ function showTransactionForm(preselectedAssetId = '') {
                 }
               }
             });
-            
+
             if (body.quantity > availableQty) {
               document.getElementById('tx-result').innerHTML = `
                 <div class="result-message result-error">
@@ -560,18 +608,18 @@ function showTransactionForm(preselectedAssetId = '') {
               <br>Transaction ID: <strong>${json.transaction_id}</strong>
             </div>
           `;
-          
+
           // Clear cache after new transaction
           DataCache.clearCache();
-          
+
           // Refresh form after successful submission
           form.reset();
-          
+
           // Auto-redirect to dashboard after a short delay
           setTimeout(() => {
             loadDashboard();
           }, 3000);
-          
+
         } catch (err) {
           resultEl.innerHTML = `
             <div class="result-message result-error">
@@ -590,21 +638,21 @@ function showTransactionForm(preselectedAssetId = '') {
 async function loadTransactions() {
   setActiveNavItem('btn-view-transactions');
   pageTitleEl.textContent = 'Transaction History';
-  
+
   contentEl.innerHTML = `
     <div class="loading-spinner">
       <i class="fas fa-spinner fa-spin"></i>
       <span>Loading transactions...</span>
     </div>
   `;
-  
+
   try {
     // Get data from cache
     const [assets, transactions] = await Promise.all([
       DataCache.getAssets(),
       DataCache.getTransactions(userId)
     ]);
-    
+
     if (transactions.length === 0) {
       contentEl.innerHTML = `
         <p>No transactions found for your account.</p>
@@ -622,7 +670,7 @@ async function loadTransactions() {
       const asset = assets.find(a => a.asset_id === tx.asset_id);
       const assetName = asset ? asset.asset_name : tx.asset_id;
       const total = tx.quantity * tx.price;
-      
+
       return `
         <tr>
           <td>${new Date(tx.date).toLocaleString()}</td>
@@ -665,7 +713,7 @@ async function loadTransactions() {
 async function loadGains() {
   setActiveNavItem('btn-view-gains');
   pageTitleEl.textContent = 'Portfolio Analysis';
-  
+
   contentEl.innerHTML = `
     <div class="loading-spinner">
       <i class="fas fa-spinner fa-spin"></i>
@@ -679,7 +727,7 @@ async function loadGains() {
       DataCache.getAssets(),
       DataCache.getTransactions(userId)
     ]);
-    
+
     if (transactions.length === 0) {
       contentEl.innerHTML = `
         <p>No transactions found for analysis. Add some transactions first.</p>
@@ -689,15 +737,15 @@ async function loadGains() {
       `;
       return;
     }
-    
+
     // Calculate gains per asset
     let totalGains = 0;
     let assetGains = {};
     let assetTransactions = {};
-    
+
     transactions.forEach(tx => {
       const transactionValue = tx.quantity * tx.price;
-      
+
       // Initialize asset if not exists
       if (!assetGains[tx.asset_id]) {
         assetGains[tx.asset_id] = {
@@ -712,10 +760,10 @@ async function loadGains() {
         };
         assetTransactions[tx.asset_id] = [];
       }
-      
+
       // Add to asset transactions
       assetTransactions[tx.asset_id].push(tx);
-      
+
       // Update gains based on transaction type
       if (tx.transaction_type === 'Buy') {
         assetGains[tx.asset_id].buys += transactionValue;
@@ -728,14 +776,14 @@ async function loadGains() {
         assetGains[tx.asset_id].returns += transactionValue;
         totalGains += transactionValue; // Add Sell value
       }
-      
+
       // Calculate gain
       assetGains[tx.asset_id].gain = assetGains[tx.asset_id].returns - assetGains[tx.asset_id].buys;
     });
-    
+
     // Sort assets by gain (highest first)
     const sortedAssets = Object.values(assetGains).sort((a, b) => b.gain - a.gain);
-    
+
     // Generate asset rows
     const assetRows = sortedAssets.map(asset => {
       const gainPercentage = asset.invested > 0 ? (asset.gain / asset.invested) * 100 : 0;
@@ -752,12 +800,12 @@ async function loadGains() {
         </tr>
       `;
     }).join('');
-    
+
     // Calculate total portfolio metrics
     const totalInvested = sortedAssets.reduce((sum, asset) => sum + asset.invested, 0);
     const totalReturns = sortedAssets.reduce((sum, asset) => sum + asset.returns, 0);
     const gainPercentage = totalInvested > 0 ? (totalGains / totalInvested) * 100 : 0;
-    
+
     contentEl.innerHTML = `
       <div class="summary-cards">
         <div class="summary-card">
